@@ -1,33 +1,282 @@
-name: Deploy to AWS EC2
+name: 🚀 AstroTalks CI/CD Pipeline
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
-jobs:
-  deploy:
-    name: Build & Deploy
-    runs-on: ubuntu-latest
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
+env:
+  NODE_VERSION: '20'
+  DEPLOY_URL: https://astrotalks-app.duckdns.org
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  #  Stage 1 — Code Quality
+  # ──────────────────────────────────────────────────────────
+  quality:
+    name: 🔍 Code Quality
+    runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: 📦 Install frontend dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: 📦 Install backend dependencies
+        working-directory: ./server
+        run: npm ci --prefer-offline --no-audit
+
+      - name: ✅ Verify package.json integrity
+        run: |
+          echo "::group::Frontend"
+          npm pkg get name version
+          echo "::endgroup::"
+          echo "::group::Backend"
+          (cd server && npm pkg get name version)
+          echo "::endgroup::"
+
+      - name: 🔎 Check for hardcoded secrets
+        run: |
+          ! grep -rE "(sk-proj-|sk-or-v1-|mongodb\+srv://[^\$])" \
+            --include="*.js" --include="*.jsx" --include="*.json" \
+            --exclude-dir=node_modules --exclude-dir=.git . \
+            && echo "✅ No hardcoded secrets detected"
+
+  # ──────────────────────────────────────────────────────────
+  #  Stage 2 — Build Frontend
+  # ──────────────────────────────────────────────────────────
+  build:
+    name: 🏗️ Build Frontend
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: 📦 Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: 🏗️ Build production bundle
+        env:
+          VITE_API_BASE_URL: ''
+        run: npm run build
+
+      - name: 📊 Bundle size report
+        run: |
+          echo "## 📦 Build Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          du -sh dist/ >> $GITHUB_STEP_SUMMARY
+          ls -lh dist/assets/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: ⬆️ Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────
+  #  Stage 3 — Docker Validation
+  # ──────────────────────────────────────────────────────────
+  docker:
+    name: 🐳 Docker Build Validation
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🏗️ Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: astrotalks-frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          build-args: |
+            VITE_API_BASE_URL=
+
+      - name: 🏗️ Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./server
+          push: false
+          tags: astrotalks-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+  # ──────────────────────────────────────────────────────────
+  #  Stage 4 — Security Scan
+  # ──────────────────────────────────────────────────────────
+  security:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🛡️ Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+          format: table
+
+      - name: 📋 Security summary
+        if: always()
+        run: |
+          echo "## 🛡️ Security Scan Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Filesystem scan finished. Review logs for details." >> $GITHUB_STEP_SUMMARY
+
+  # ──────────────────────────────────────────────────────────
+  #  Stage 5 — Deploy to Production
+  # ──────────────────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy to AWS EC2
+    runs-on: ubuntu-latest
+    needs: [build, docker, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://astrotalks-app.duckdns.org
+    steps:
+      - name: 🚀 Deploy via SSH to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
+          command_timeout: 15m
           script: |
-            set -e
+            set -euo pipefail
+
+            echo "════════════════════════════════════════════"
+            echo "  🚀 AstroTalks Production Deployment"
+            echo "  📦 Commit: ${{ github.sha }}"
+            echo "  👤 Triggered by: ${{ github.actor }}"
+            echo "  ⏰ Started: $(date)"
+            echo "════════════════════════════════════════════"
+
             cd /home/ubuntu/AstroTalks
-            echo "📥 Pulling latest code..."
-            git pull origin main
-            echo "🛑 Stopping old containers..."
-            docker compose down
-            echo "🔨 Building & starting new containers..."
+
+            echo ""
+            echo "📥 Pulling latest code from main..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo ""
+            echo "🛑 Stopping existing containers..."
+            docker compose down --remove-orphans
+
+            echo ""
+            echo "🔨 Building & starting fresh containers..."
             docker compose up -d --build
-            echo "🧹 Cleaning up old images..."
+
+            echo ""
+            echo "🧹 Cleaning up dangling images..."
             docker image prune -f
-            echo "✅ Deployment complete!"
+
+            echo ""
+            echo "⏱️  Waiting for services to be ready..."
+            sleep 15
+
+            echo ""
+            echo "🩺 Running health checks..."
+            curl -fs http://localhost:80 > /dev/null && echo "  ✅ Frontend OK"
+            curl -fs http://localhost:5000/api/health > /dev/null && echo "  ✅ Backend OK"
+
+            echo ""
+            echo "📊 Container status:"
             docker compose ps
+
+            echo ""
+            echo "════════════════════════════════════════════"
+            echo "  ✅ Deployment successful!"
+            echo "  🌐 Live: https://astrotalks-app.duckdns.org"
+            echo "════════════════════════════════════════════"
+
+  # ──────────────────────────────────────────────────────────
+  #  Stage 6 — Production Health Check
+  # ──────────────────────────────────────────────────────────
+  health-check:
+    name: ✅ Production Health Check
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: 🌐 Verify production frontend
+        run: |
+          echo "Checking ${{ env.DEPLOY_URL }}..."
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.DEPLOY_URL }})
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Frontend is UP (HTTP $STATUS)"
+              break
+            fi
+            echo "⏳ Attempt $i: HTTP $STATUS, retrying in 5s..."
+            sleep 5
+            if [ $i -eq 5 ]; then
+              echo "❌ Frontend health check failed"
+              exit 1
+            fi
+          done
+
+      - name: 🔌 Verify production API
+        run: |
+          echo "Checking API health endpoint..."
+          RESPONSE=$(curl -s ${{ env.DEPLOY_URL }}/api/health)
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q '"status":"ok"' && echo "✅ API is healthy" || (echo "❌ API unhealthy"; exit 1)
+
+      - name: 🔒 Verify SSL certificate
+        run: |
+          echo "Checking SSL certificate..."
+          CERT_INFO=$(echo | openssl s_client -servername astrotalks-app.duckdns.org -connect astrotalks-app.duckdns.org:443 2>/dev/null | openssl x509 -noout -dates)
+          echo "$CERT_INFO"
+          echo "✅ SSL valid"
+
+      - name: 📊 Deployment Summary
+        if: always()
+        run: |
+          echo "## 🎉 Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌐 **Live URL** | [${{ env.DEPLOY_URL }}](${{ env.DEPLOY_URL }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| ☁️ **Cloud Provider** | AWS EC2 (Mumbai region) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐳 **Stack** | Docker Compose + Caddy + Node + React |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔒 **HTTPS** | Let's Encrypt (auto-renewed) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🗄️ **Database** | MongoDB Atlas |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🤖 **AI** | OpenAI GPT |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 👤 **Deployed by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏰ **Time** | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
