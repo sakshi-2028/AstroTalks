@@ -50,10 +50,14 @@ jobs:
 
       - name: 🔎 Check for hardcoded secrets
         run: |
-          ! grep -rE "(sk-proj-|sk-or-v1-|mongodb\+srv://[^\$])" \
-            --include="*.js" --include="*.jsx" --include="*.json" \
-            --exclude-dir=node_modules --exclude-dir=.git . \
-            && echo "✅ No hardcoded secrets detected"
+          # Match real API keys (>= 30 chars after prefix) and real Mongo URIs (with creds)
+          if grep -rE "(sk-proj-[A-Za-z0-9_-]{30,}|sk-or-v1-[A-Za-z0-9_-]{30,}|mongodb\+srv://[A-Za-z0-9_-]+:[^@\s'\"\\\$]+@)" \
+              --include="*.js" --include="*.jsx" --include="*.json" --include="*.env" \
+              --exclude-dir=node_modules --exclude-dir=.git --exclude="package-lock.json" .; then
+            echo "❌ Hardcoded secret detected!"
+            exit 1
+          fi
+          echo "✅ No hardcoded secrets detected"
 
   # ──────────────────────────────────────────────────────────
   #  Stage 2 — Build Frontend
