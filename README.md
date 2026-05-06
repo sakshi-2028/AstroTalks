@@ -178,8 +178,10 @@ AstroTalks/
 ### Prerequisites
 - Node.js 20+
 - Docker Desktop
+- Docker Compose v2
 - MongoDB Atlas account (free)
 - OpenAI API key
+- AWS account (for production deployment)
 
 ### Local Development (Docker)
 
