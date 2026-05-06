@@ -243,6 +243,15 @@ The production environment is fully automated. To deploy:
 | `OPENAI_API_KEY` | OpenAI API key (server-side only) |
 | `PORT` | Backend port (5000) |
 
+### Troubleshooting
+
+| Issue | Solution |
+|---|---|
+| Site not loading | SSH into EC2 and run `docker compose ps` to verify containers |
+| SSL certificate errors | Check Caddy logs: `docker compose logs caddy` |
+| Backend connection failed | Verify MongoDB Atlas Network Access allows your EC2 IP |
+| GitHub Actions failure | Confirm `EC2_HOST` and `EC2_SSH_KEY` secrets are set correctly |
+
 ---
 
 ## 🔐 Security
