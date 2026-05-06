@@ -1,10 +1,14 @@
 name: 🚀 AstroTalks CI/CD Pipeline
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # Auto-trigger on push/PR temporarily disabled — production environment
+  # is currently offline. Re-enable by uncommenting the lines below when
+  # the EC2 target is restored.
+  #
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
   workflow_dispatch:
 
 concurrency:
